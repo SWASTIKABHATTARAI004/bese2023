@@ -1,4 +1,4 @@
-name: Deploy Website
+name: Deploy Static HTML
 
 on:
   push:
@@ -8,36 +8,63 @@ jobs:
   deploy:
     runs-on: ubuntu-latest
 
+    env:
+      HOST: ${{ secrets.SERVER_HOST }}
+      USER: ${{ secrets.SERVER_USERNAME }}
+      PASS: ${{ secrets.SERVER_PASSWORD }}
+      PORT: "8042"
+
     steps:
-      - uses: actions/checkout@v3
+      - name: Checkout code
+        uses: actions/checkout@v4
 
-      - name: Setup Apache & Deploy
-        uses: appleboy/ssh-action@master
-        with:
-          host: ${{ secrets.SERVER_HOST }}
-          username: ${{ secrets.SERVER_USER }}
-          password: ${{ secrets.SERVER_PASS }}
-          port: 42
-          script: |
-            apt-get update -y
-            apt-get install apache2 -y
-            systemctl start apache2
-            systemctl enable apache2
-            ufw allow 80
-            ufw allow 42
-            ufw --force enable
+      - name: Install sshpass
+        run: sudo apt-get update -qq && sudo apt-get install -y -qq sshpass
 
-      - name: Upload Website Files
-        uses: appleboy/scp-action@master
-        with:
-          host: ${{ secrets.SERVER_HOST }}
-          username: ${{ secrets.SERVER_USER }}
-          password: ${{ secrets.SERVER_PASS }}
-          port: 42
-          source: "./*"
-          target: "/var/www/html/"
-
-      - name: Verify
+      - name: Setup Apache Server
         run: |
-          sleep 5
-          curl --fail http://${{ secrets.SERVER_HOST }}:80/
+          set -e
+
+          echo '<VirtualHost *:'"$PORT"'>' > /tmp/site.conf
+          echo '    DocumentRoot /home/'"$USER"'/website' >> /tmp/site.conf
+          echo '    <Directory /home/'"$USER"'/website>' >> /tmp/site.conf
+          echo '        Options Indexes FollowSymLinks' >> /tmp/site.conf
+          echo '        AllowOverride None' >> /tmp/site.conf
+          echo '        Require all granted' >> /tmp/site.conf
+          echo '    </Directory>' >> /tmp/site.conf
+          echo '</VirtualHost>' >> /tmp/site.conf
+
+          sshpass -p "$PASS" scp -o StrictHostKeyChecking=no /tmp/site.conf "$USER@$HOST:/tmp/site.conf"
+
+          sshpass -p "$PASS" ssh -o StrictHostKeyChecking=no "$USER@$HOST" "
+            set -e
+
+            if ! dpkg -s apache2 >/dev/null 2>&1; then
+              echo '$PASS' | sudo -S apt-get update -qq
+              echo '$PASS' | sudo -S apt-get install -y -qq apache2
+            fi
+
+            mkdir -p ~/website
+
+            if ! grep -q 'Listen $PORT' /etc/apache2/ports.conf; then
+              echo '$PASS' | sudo -S sh -c 'echo Listen $PORT >> /etc/apache2/ports.conf'
+            fi
+
+            echo '$PASS' | sudo -S mv /tmp/site.conf /etc/apache2/sites-available/site.conf
+
+            if ! [ -L /etc/apache2/sites-enabled/site.conf ]; then
+              echo '$PASS' | sudo -S a2ensite site.conf
+            fi
+
+            echo '$PASS' | sudo -S apache2ctl graceful
+          "
+
+      - name: Upload files
+        run: |
+          sshpass -p "$PASS" scp -r -o StrictHostKeyChecking=no ./* "$USER@$HOST:/home/$USER/website/"
+
+      - name: Verify Deployment
+        run: |
+          sleep 2
+          curl "http://$HOST:$PORT/"
+          
